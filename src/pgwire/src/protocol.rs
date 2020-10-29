@@ -87,29 +87,23 @@ impl<A> StateMachine<A>
 where
     A: AsyncRead + AsyncWrite + Send + Unpin,
 {
-    // Manually desugar this (don't use `async fn run`) here because a much better
-    // error message is produced if there are problems with Send or other traits
-    // somewhere within the Future.
-    #[allow(clippy::manual_async_fn)]
-    pub fn run(
+    pub async fn run(
         mut self,
         version: i32,
         params: Vec<(String, String)>,
-    ) -> impl Future<Output = Result<(), comm::Error>> + Send {
-        async move {
-            let mut state = self.startup(version, params).await?;
+    ) -> Result<(), comm::Error> {
+        let mut state = self.startup(version, params).await?;
 
-            loop {
-                state = match state {
-                    State::Ready => self.advance_ready().await?,
-                    State::Drain => self.advance_drain().await?,
-                    State::Done => break,
-                }
+        loop {
+            state = match state {
+                State::Ready => self.advance_ready().await?,
+                State::Drain => self.advance_drain().await?,
+                State::Done => break,
             }
-
-            self.coord_client.terminate().await;
-            Ok(())
         }
+
+        self.coord_client.terminate().await;
+        Ok(())
     }
 
     async fn advance_ready(&mut self) -> Result<State, comm::Error> {
@@ -395,11 +389,11 @@ where
         raw_params: Vec<Option<Vec<u8>>>,
         result_formats: Vec<pgrepr::Format>,
     ) -> Result<State, comm::Error> {
-        let stmt = self
+        let stmt = match self
             .coord_client
             .session()
-            .get_prepared_statement(&statement_name);
-        let stmt = match stmt {
+            .get_prepared_statement(&statement_name)
+         {
             Some(stmt) => stmt,
             None => {
                 return self
