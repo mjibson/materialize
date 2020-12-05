@@ -207,6 +207,12 @@ fn test_http_sql() -> Result<(), Box<dyn Error>> {
             status: StatusCode::BAD_REQUEST,
             body: r#"unsupported plan"#,
         },
+        // TAIL should not work.
+        TestCase {
+            query: "tail mz_catalog.mz_objects",
+            status: StatusCode::BAD_REQUEST,
+            body: r#"unsuppoeerted plan"#,
+        },
     ];
 
     for tc in tests {
@@ -217,4 +223,41 @@ fn test_http_sql() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+// Test the /tail GET endpoint of the HTTP server.
+#[test]
+fn test_http_tail() {
+    datadriven::walk("tests/testdata/tail", |tf| {
+        let (server, mut client) = util::start_server(util::Config::default()).unwrap();
+        tf.run(|tc| match tc.directive.as_str() {
+            "exec-sql" => match client.batch_execute(&tc.input) {
+                Ok(_) => "ok".into(),
+                Err(err) => format!("error: {}", err),
+            },
+            "tail" => {
+                let query: String = tc
+                    .args
+                    .iter()
+                    .flat_map(|(key, vals)| {
+                        if vals.is_empty() {
+                            vec![key.clone()]
+                        } else {
+                            vals.into_iter()
+                                .map(|val| format!("{}={}", key, val))
+                                .collect()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("&");
+                let url = format!("http://{}/tail?{}", server.inner.local_addr(), query);
+                let res = Client::new().get(&url).send().unwrap();
+                if res.status() != 200 {
+                    return formatln!("{}: {}", res.status(), res.text().unwrap());
+                }
+                return formatln!("{}: {}", res.status(), res.text().unwrap());
+            }
+            _ => panic!("unknown directive {}", tc.directive),
+        });
+    });
 }

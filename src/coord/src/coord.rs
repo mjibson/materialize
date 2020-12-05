@@ -778,10 +778,6 @@ where
                     let desc = describe(&catalog, stmt.clone(), &[], None)?;
                     let pcx = PlanContext::default();
                     let plan = sql::plan::plan(&pcx, &catalog, stmt, &params)?;
-                    // At time of writing this comment, Peeks use the connection id only for
-                    // logging, so it is safe to reuse the system id, which is the conn_id from
-                    // for_system_session().
-                    let conn_id = catalog.conn_id();
                     let response = match plan {
                         Plan::Peek {
                             source,
@@ -789,11 +785,37 @@ where
                             finishing,
                             copy_to,
                         } => {
+                            // At time of writing this comment, Peeks use the connection id only for
+                            // logging, so it is safe to reuse the system id, which is the conn_id from
+                            // for_system_session().
+                            let conn_id = catalog.conn_id();
                             self.sequence_peek(conn_id, source, when, finishing, copy_to)
                                 .await?
                         }
 
                         Plan::SendRows(rows) => send_immediate_rows(rows),
+
+                        Plan::Tail {
+                            id,
+                            ts,
+                            with_snapshot,
+                            copy_to,
+                            emit_progress,
+                            object_columns,
+                            desc,
+                        } => {
+                            self.sequence_tail(
+                                None,
+                                id,
+                                with_snapshot,
+                                ts,
+                                copy_to,
+                                emit_progress,
+                                object_columns,
+                                desc,
+                            )
+                            .await?
+                        }
 
                         _ => coord_bail!("unsupported plan"),
                     };
@@ -1664,7 +1686,7 @@ where
                 desc,
             } => tx.send(
                 self.sequence_tail(
-                    &mut session,
+                    Some(&mut session),
                     id,
                     with_snapshot,
                     ts,
@@ -2470,7 +2492,7 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn sequence_tail(
         &mut self,
-        session: &mut Session,
+        mut session: Option<&mut Session>,
         source_id: GlobalId,
         with_snapshot: bool,
         ts: Option<Timestamp>,
@@ -2484,13 +2506,19 @@ where
         let frontier = self.determine_frontier(ts, source_id)?;
         let sink_name = format!(
             "tail-source-{}",
-            self.catalog
-                .for_session(session)
-                .humanize_id(source_id)
-                .expect("Source id is known to exist in catalog")
+            match &session {
+                Some(session) => self
+                    .catalog
+                    .for_session(session)
+                    .humanize_id(source_id)
+                    .expect("Source id is known to exist in catalog"),
+                None => "blah".into(),
+            },
         );
         let sink_id = self.catalog.allocate_id()?;
-        session.add_drop_sink(sink_id);
+        if let Some(session) = session.as_mut() {
+            session.add_drop_sink(sink_id);
+        }
         let (tx, rx) = self.switchboard.mpsc_limited(self.total_workers);
 
         self.ship_dataflow(self.dataflow_builder().build_sink_dataflow(

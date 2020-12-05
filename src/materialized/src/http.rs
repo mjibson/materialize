@@ -30,6 +30,7 @@ mod metrics;
 mod prof;
 mod root;
 mod sql;
+mod tail;
 mod util;
 
 const METHODS: &[&[u8]] = &[
@@ -95,7 +96,7 @@ impl Server {
 
     async fn handle_connection_inner<A>(&self, conn: A) -> Result<(), anyhow::Error>
     where
-        A: AsyncRead + AsyncWrite + Unpin + 'static,
+        A: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let svc = service::service_fn(move |req| match (req.method(), req.uri().path()) {
             (&Method::GET, "/") => self.handle_home(req).boxed(),
@@ -105,11 +106,15 @@ impl Server {
             (&Method::GET, "/memory") => self.handle_memory(req).boxed(),
             (&Method::POST, "/prof") => self.handle_prof(req).boxed(),
             (&Method::POST, "/sql") => self.handle_sql(req).boxed(),
+            (&Method::GET, "/tail") => self.handle_tail(req).boxed(),
             (&Method::GET, "/internal/catalog") => self.handle_internal_catalog(req).boxed(),
             _ => self.handle_static(req).boxed(),
         });
         let http = hyper::server::conn::Http::new();
-        http.serve_connection(conn, svc).err_into().await
+        http.serve_connection(conn, svc)
+            .with_upgrades()
+            .err_into()
+            .await
     }
 
     // Handler functions are attached by various submodules. They all have a

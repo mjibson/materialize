@@ -41,7 +41,9 @@ coord = { path = "../coord" }
 dataflow = { path = "../dataflow" }
 dataflow-types = { path = "../dataflow-types" }
 differential-dataflow = { git = "https://github.com/TimelyDataflow/differential-dataflow.git" }
+form_urlencoded = "1.0"
 futures = "0.3.12"
+headers = "0.3"
 hex = "0.4.0"
 hyper = { version = "0.14.0", features = ["http1", "server"] }
 include_dir = "0.6.0"
@@ -58,6 +60,7 @@ openssl-sys = { version = "0.9.59", features = ["vendored"] }
 ore = { path = "../ore" }
 os_info = "3.0.1"
 parse_duration = "2.1.0"
+pgrepr = { path = "../pgrepr" }
 pgwire = { path = "../pgwire" }
 prof = { path = "../prof", features = ["auto-jemalloc"] }
 prometheus = { git = "https://github.com/MaterializeInc/rust-prometheus.git", default-features = false }
@@ -78,6 +81,7 @@ tempfile = "3.2.0"
 timely = { git = "https://github.com/TimelyDataflow/timely-dataflow", default-features = false, features = ["bincode"] }
 tokio = { version = "1.1.0", features = ["sync"] }
 tokio-openssl = "0.6.1"
+tokio-tungstenite = "0.13"
 tracing = "0.1.21"
 # TODO(benesch): we can use the default features here once tracing-subscriber
 # does not enable chrono's "oldtime" feature.
