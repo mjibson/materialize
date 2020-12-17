@@ -934,3 +934,85 @@ impl fmt::Display for ScalarType {
         }
     }
 }
+
+// Do not mark this as #[cfg(test)] because interesting_datums needs to be useable by other
+pub mod tests {
+    use std::str::FromStr;
+
+    use crate::adt::decimal::{Decimal, Significand, MAX_DECIMAL_PRECISION};
+    use crate::{Datum, ScalarType};
+
+    /// A collection of edge-case datums. These should be used in tests to verify
+    /// we are doing the correct thing most of the time. They should be used for
+    /// all encoding/decoding routines and in any kind of random SQL testing that
+    /// need to generate random datums.
+    pub fn interesting_datums() -> Vec<(ScalarType, Datum<'static>)> {
+        vec![
+            (ScalarType::Bool, Datum::True),
+            (ScalarType::Bool, Datum::False),
+            make_decimal("-000.000"),
+            make_decimal("-0000021234.23246346000000"),
+            make_decimal("-1.2"),
+            make_decimal(".0"),
+            make_decimal(".1"),
+            make_decimal(".1234"),
+            make_decimal(".12345"),
+            make_decimal("0"),
+            make_decimal("0."),
+            make_decimal("0.0"),
+            make_decimal("0.000006"),
+            make_decimal("0.0000124000"),
+            make_decimal("0.00005"),
+            make_decimal("0.0004"),
+            make_decimal("0.003"),
+            make_decimal("0.00300"),
+            make_decimal("0.02"),
+            make_decimal("0.038665987681445668"),
+            make_decimal("0.1"),
+            make_decimal("00.00"),
+            make_decimal("1"),
+            make_decimal("1.000000000000006"),
+            make_decimal("1.00000000000005"),
+            make_decimal("1.0000000000004"),
+            make_decimal("1.000000000003"),
+            make_decimal("1.00000000002"),
+            make_decimal("1.0000000001"),
+            make_decimal("1.000000009"),
+            make_decimal("1.00000008"),
+            make_decimal("1.0000007"),
+            make_decimal("1.000006"),
+            make_decimal("1.00005"),
+            make_decimal("1.0004"),
+            make_decimal("1.003"),
+            make_decimal("1.02"),
+            make_decimal("1.1"),
+            make_decimal("10000.000006"),
+            make_decimal("10000.00005"),
+            make_decimal("10000.0004"),
+            make_decimal("10000.003"),
+            make_decimal("10000.02"),
+            make_decimal("10000.1"),
+            make_decimal("1000000"),
+            make_decimal("123"),
+            make_decimal("12345"),
+            make_decimal("12345.1"),
+            make_decimal("12345.1234"),
+            make_decimal("12345.12345"),
+            make_decimal("2.2289971159100284"),
+            make_decimal("42"),
+            make_decimal("42.0"),
+            make_decimal("420000"),
+            make_decimal("420000.0"),
+            //make_decimal("3409589268520956934250.2344098732054547"),
+            //make_decimal("3.147E37"),
+        ]
+    }
+
+    fn make_decimal(s: &str) -> (ScalarType, Datum) {
+        let d = Decimal::from_str(s).unwrap();
+        (
+            ScalarType::Decimal(MAX_DECIMAL_PRECISION, d.scale()),
+            Datum::Decimal(Significand::new(d.significand())),
+        )
+    }
+}

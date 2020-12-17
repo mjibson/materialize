@@ -40,3 +40,5 @@ pub use scalar::{Datum, ScalarBaseType, ScalarType};
 pub type Timestamp = u64;
 /// System-wide record count difference type.
 pub type Diff = isize;
+
+pub use scalar::tests;
