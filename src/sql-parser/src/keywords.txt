@@ -51,6 +51,7 @@ Character
 Check
 Close
 Coalesce
+Cockroach
 Collate
 Columns
 Commit

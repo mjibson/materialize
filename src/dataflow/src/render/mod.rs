@@ -138,7 +138,8 @@ use crate::render::context::{ArrangementFlavor, Context};
 use crate::server::{CacheMessage, LocalInput, TimestampDataUpdates, TimestampMetadataUpdates};
 use crate::sink;
 use crate::source::{
-    self, FileSourceInfo, KafkaSourceInfo, KinesisSourceInfo, PostgresSimpleSource, S3SourceInfo,
+    self, CockroachSimpleSource, FileSourceInfo, KafkaSourceInfo, KinesisSourceInfo,
+    PostgresSimpleSource, S3SourceInfo,
 };
 use crate::source::{SourceConfig, SourceToken};
 use crate::{
@@ -374,6 +375,20 @@ where
                     );
 
                     (ok_stream, capability)
+                } else if let ExternalSourceConnector::Cockroach(crdb_connector) = connector {
+                    let source = CockroachSimpleSource::new(crdb_connector);
+
+                    let ((ok_stream, err_stream), capability) =
+                        source::create_source_simple(source_config, source);
+
+                    err_collection = err_collection.concat(
+                        &err_stream
+                            .map(DataflowError::SourceError)
+                            .pass_through("source-errors")
+                            .as_collection(),
+                    );
+
+                    (ok_stream, capability)
                 } else {
                     let ((ok_source, err_source), capability) = match connector {
                         ExternalSourceConnector::Kafka(_) => {
@@ -396,6 +411,7 @@ where
                         }
                         ExternalSourceConnector::AvroOcf(_) => unreachable!(),
                         ExternalSourceConnector::Postgres(_) => unreachable!(),
+                        ExternalSourceConnector::Cockroach(_) => unreachable!(),
                     };
                     err_collection = err_collection.concat(
                         &err_source
@@ -605,16 +621,22 @@ where
         //
         // TODO: Improve collection and arrangement re-use.
         self.collections.retain(|e, _| {
-            matches!(e, MirRelationExpr::Get {
-                id: Id::Global(_),
-                typ: _,
-            })
+            matches!(
+                e,
+                MirRelationExpr::Get {
+                    id: Id::Global(_),
+                    typ: _,
+                }
+            )
         });
         self.local.retain(|e, _| {
-            matches!(e, MirRelationExpr::Get {
-                id: Id::Global(_),
-                typ: _,
-            })
+            matches!(
+                e,
+                MirRelationExpr::Get {
+                    id: Id::Global(_),
+                    typ: _,
+                }
+            )
         });
         // We do not install in `context.trace`, and can skip deleting things from it.
     }
