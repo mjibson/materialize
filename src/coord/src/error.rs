@@ -40,6 +40,9 @@ pub enum CoordError {
     ReadOnlyTransaction,
     /// The specified session parameter is read-only.
     ReadOnlyParameter(&'static (dyn Var + Send + Sync)),
+    /// A query in a transaction referenced a relation outside the first query's
+    /// time domain.
+    RelationOutsideTimeDomain(String),
     /// An error occurred in a SQL catalog operation.
     SqlCatalog(sql::catalog::CatalogError),
     /// The transaction is in single-tail mode.
@@ -120,6 +123,9 @@ impl fmt::Display for CoordError {
             CoordError::ReadOnlyTransaction => f.write_str("transaction in read-only mode"),
             CoordError::ReadOnlyParameter(p) => {
                 write!(f, "parameter {} cannot be changed", p.name().quoted())
+            }
+            CoordError::RelationOutsideTimeDomain(s) => {
+                write!(f, "{} not in schemas of the first query", s.quoted())
             }
             CoordError::SqlCatalog(e) => e.fmt(f),
             CoordError::TailOnlyTransaction => {

@@ -322,6 +322,7 @@ impl ErrorResponse {
             CoordError::OperationRequiresTransaction(_) => SqlState::NO_ACTIVE_SQL_TRANSACTION,
             CoordError::ReadOnlyTransaction => SqlState::READ_ONLY_SQL_TRANSACTION,
             CoordError::ReadOnlyParameter(_) => SqlState::CANT_CHANGE_RUNTIME_PARAM,
+            CoordError::RelationOutsideTimeDomain(_) => SqlState::INVALID_TRANSACTION_STATE,
             CoordError::SqlCatalog(_) => SqlState::INTERNAL_ERROR,
             CoordError::TailOnlyTransaction => SqlState::INVALID_TRANSACTION_STATE,
             CoordError::Transform(_) => SqlState::INTERNAL_ERROR,

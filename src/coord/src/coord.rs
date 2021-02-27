@@ -34,12 +34,12 @@
 //! processed during the next [`maintenance()`](Coordinator::maintenance) call.
 
 use std::cmp;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::{TryFrom, TryInto};
 use std::iter;
 use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -50,7 +50,6 @@ use futures::future::{self, FutureExt, TryFutureExt};
 use futures::stream::{self, StreamExt};
 use rand::Rng;
 use timely::communication::WorkerGuards;
-use timely::progress::frontier::MutableAntichain;
 use timely::progress::{Antichain, ChangeBatch, Timestamp as _};
 use tokio::runtime::{Handle as TokioHandle, Runtime};
 use tokio::sync::{mpsc, watch};
@@ -78,7 +77,7 @@ use sql::ast::{
     CreateIndexStatement, CreateTableStatement, DropObjectsStatement, ExplainOptions, ExplainStage,
     FetchStatement, Ident, ObjectType, Raw, Statement,
 };
-use sql::catalog::{Catalog as _, CatalogError, CatalogItem as _, CatalogItemType};
+use sql::catalog::{Catalog as _, CatalogError};
 use sql::names::{DatabaseSpecifier, FullName, SchemaName};
 use sql::plan::StatementDesc;
 use sql::plan::{
@@ -86,7 +85,7 @@ use sql::plan::{
 };
 use transform::Optimizer;
 
-use self::arrangement_state::{ArrangementFrontiers, Frontiers};
+use self::arrangement_state::{ArrangementFrontiers, Frontiers, MutableAntichainRc};
 use crate::cache::{CacheConfig, Cacher};
 use crate::catalog::builtin::{
     BUILTINS, MZ_ARRAY_TYPES, MZ_AVRO_OCF_SINKS, MZ_BASE_TYPES, MZ_COLUMNS, MZ_DATABASES,
@@ -208,14 +207,16 @@ pub struct Coordinator {
     /// A map from connection ID to metadata about that connection for all
     // active connections.
     active_conns: HashMap<u32, ConnMeta>,
+
+    since_handles: HashMap<GlobalId, MutableAntichainRc<Timestamp>>,
     /// Tracks active read transactions so that we don't compact any indexes beyond
     /// an in-progress transaction.
     txn_reads: HashMap<u32, TxnReads>,
     /// A merged version of `indexes` and `txn_reads` that is used to inform the
     /// dataflow workers what they should compact.
-    compaction_frontiers: HashMap<GlobalId, MutableAntichain<Timestamp>>,
+    //compaction_frontiers: HashMap<GlobalId, MutableAntichain<Timestamp>>,
     /// Holds pending compaction messages to be sent to the dataflow workers.
-    since_updates: HashMap<GlobalId, Antichain<Timestamp>>,
+    since_updates: HashMap<GlobalId, Arc<Mutex<Antichain<Timestamp>>>>,
 }
 
 /// Metadata about an active connection.
@@ -235,8 +236,9 @@ struct ConnMeta {
 }
 
 pub struct TxnReads {
-    timestamp: Timestamp,
-    ids: Vec<GlobalId>,
+    //timestamp: Timestamp,
+    ids: HashSet<GlobalId>,
+    _handles: Vec<MutableAntichainRc<Timestamp>>,
 }
 
 impl Coordinator {
@@ -329,8 +331,9 @@ impl Coordinator {
                         // TODO(benesch): why is this hardcoded to 1000?
                         // Should it not be the same logical compaction window
                         // that everything else uses?
-                        self.indexes
-                            .insert(*id, Frontiers::new(self.num_workers(), Some(1_000)));
+                        let (frontier, since) = Frontiers::new(self.num_workers(), Some(1_000));
+                        self.indexes.insert(*id, frontier);
+                        self.since_handles.insert(*id, since);
                     } else {
                         self.ship_dataflow(self.dataflow_builder().build_index_dataflow(*id))
                             .await?;
@@ -843,58 +846,12 @@ impl Coordinator {
                                         / compaction_window_ms),
                             );
                         }
-                        if index_state.since != compaction_frontier {
-                            // Mark previous since for eviction.
-                            let mut updates: Vec<_> = index_state
-                                .since
-                                .elements()
-                                .iter()
-                                .map(|time| (*time, -1))
-                                .collect();
-                            index_state.advance_since(&compaction_frontier);
-                            // Mark new since for insertion.
-                            for time in index_state.since.elements() {
-                                updates.push((*time, 1));
-                            }
-                            // We always want `compaction_frontiers` to have exactly one timestamp tracking
-                            // the index's since, so send both the eviction and insertion in the same
-                            // update batch.
-                            self.update_compaction_frontier(*name, updates);
-                        }
+                        let handle =
+                            index_state.since_handle(compaction_frontier.elements().to_vec());
+                        self.since_handles.insert(*name, handle);
                     }
                 }
             }
-        }
-    }
-
-    /// Updates the tracked compaction frontier for an index.
-    ///
-    /// If the antichain progressed, it is added to the pending compactions.
-    fn update_compaction_frontier<I>(&mut self, name: GlobalId, updates: I)
-    where
-        I: IntoIterator<Item = (Timestamp, i64)>,
-    {
-        // Indexes are the only things that can be compacted.
-        assert!(self.catalog.get_by_id(&name).item_type() == CatalogItemType::Index);
-        // Indexes added via `Frontiers::new` get their `since` set to
-        // `Timestamp::minimum()`. Mirror that here when we encounter an unknown index.
-        let entry = self
-            .compaction_frontiers
-            .entry(name)
-            .or_insert_with(|| MutableAntichain::new_bottom(Timestamp::minimum()));
-        let before = entry.frontier().to_owned();
-        let changed = entry.update_iter(updates).next().is_some();
-        let after = entry.frontier().to_owned();
-        // If the antichain retreated, we've done something wrong.
-        assert!(
-            timely::order::PartialOrder::less_equal(&before, &after),
-            "{}: {:?} !<= {:?}",
-            self.catalog.get_by_id(&name).name(),
-            before,
-            after
-        );
-        if changed {
-            self.since_updates.insert(name, after);
         }
     }
 
@@ -905,6 +862,16 @@ impl Coordinator {
     async fn maintenance(&mut self) {
         if !self.since_updates.is_empty() {
             let since_updates: Vec<_> = self.since_updates.drain().collect();
+            let disp = since_updates
+                .iter()
+                .filter(|update| !update.0.is_system())
+                .map(|(id, v)| {
+                    format!("{}: {:?}", self.catalog.get_by_id(id).name().to_string(), v)
+                })
+                .collect::<Vec<_>>();
+            if !disp.is_empty() {
+                println!("COMPACT: {:?}", disp);
+            }
             self.broadcast(SequencedCommand::AllowCompaction(since_updates));
         }
     }
@@ -2308,11 +2275,7 @@ impl Coordinator {
                     match ops {
                         TransactionOps::Peeks(_) => {
                             // Allow compaction of sources from this transaction.
-                            if let Some(read) = self.txn_reads.remove(&session.conn_id()) {
-                                for id in read.ids {
-                                    self.update_compaction_frontier(id, vec![(read.timestamp, -1)]);
-                                }
-                            }
+                            self.txn_reads.clear();
                             // Although the compaction frontier may have advanced, we do not need to
                             // call `maintenance` here because it will soon be called after the next
                             // `update_upper`.
@@ -2371,26 +2334,76 @@ impl Coordinator {
         // worry about preventing compaction or choosing a valid timestamp for future
         // queries.
         let timestamp = if in_transaction && when == PeekWhen::Immediately {
-            session.get_transaction_timestamp(|| {
+            let timestamp = session.get_transaction_timestamp(|| {
                 // Determine a timestamp that will be valid for anything in any schema
                 // referenced by the first query. This is a first pass implementation of "time
                 // domains".
                 let ids = self.catalog.timedomain_for(&source, conn_id);
+                println!(
+                    "NEW TXN SOURCE IDS: {:?}",
+                    source
+                        .global_uses()
+                        .iter()
+                        .map(|id| self.catalog.get_by_id(id).name().to_string())
+                        .collect::<Vec<_>>()
+                );
+                println!(
+                    "NEW TXN TIMEDOMAIN IDS: {:?}",
+                    ids.iter()
+                        .map(|id| self.catalog.get_by_id(id).name().to_string())
+                        .collect::<Vec<_>>()
+                );
 
                 // We want to prevent compaction of the indexes consulted by
-                // determine_timestamp, not the ones listed in the query, so replace ids with
-                // the index ids.
-                let (timestamp, ids) = self.determine_timestamp(&ids, PeekWhen::Immediately)?;
-                for id in ids.iter().cloned() {
-                    self.update_compaction_frontier(id, vec![(timestamp, 1i64)]);
+                // determine_timestamp, not the ones listed in the query.
+                let (timestamp, index_ids) =
+                    self.determine_timestamp(&ids, PeekWhen::Immediately)?;
+                println!(
+                    "NEW TXN INDEX IDS: {:?}",
+                    index_ids
+                        .iter()
+                        .map(|id| self.catalog.get_by_id(id).name().to_string())
+                        .collect::<Vec<_>>()
+                );
+                let mut ids = HashSet::new();
+                let mut handles = vec![];
+                for id in index_ids {
+                    handles.push(self.indexes.get(&id).unwrap().since_handle(vec![timestamp]));
+                    ids.insert(id);
                 }
-                self.txn_reads.insert(conn_id, TxnReads { timestamp, ids });
+                self.txn_reads.insert(
+                    conn_id,
+                    TxnReads {
+                        ids,
+                        _handles: handles,
+                    },
+                );
 
                 Ok(timestamp)
-            })?
+            })?;
+
+            // Verify that the indexes for this query are in the current read transaction.
+            // TODO: we should probably compare the results of timedomain_for instead of nearest_indexes.
+            let (index_ids, _indexes_complete) =
+                self.catalog.nearest_indexes(&source.global_uses());
+            let txn_reads = self.txn_reads.get(&conn_id).unwrap();
+            for id in &index_ids {
+                if !txn_reads.ids.contains(id) {
+                    return Err(CoordError::RelationOutsideTimeDomain(
+                        self.catalog.get_by_id(id).name().to_string(),
+                    ));
+                }
+            }
+
+            timestamp
         } else {
             self.determine_timestamp(&source.global_uses(), when)?.0
         };
+        println!(
+            "PEEK timestamp {} for {}",
+            timestamp,
+            source.pretty_humanized(&self.catalog.for_session(session))
+        );
 
         let source = self.prep_relation_expr(
             source,
@@ -2483,6 +2496,7 @@ impl Coordinator {
                 let key: Vec<_> = (0..typ.arity()).map(MirScalarExpr::Column).collect();
                 let view_id = self.allocate_transient_id()?;
                 let mut dataflow = DataflowDesc::new(format!("temp-view-{}", view_id));
+                println!("MAKE TEMP VIEW {}", view_id);
                 dataflow.set_as_of(Antichain::from_elem(timestamp));
                 self.dataflow_builder()
                     .import_view_into_dataflow(&view_id, &source, &mut dataflow);
@@ -2659,6 +2673,7 @@ impl Coordinator {
                 let mut candidate = if uses_ids.iter().any(|id| self.catalog.uses_tables(*id)) {
                     // If the view depends on any tables, we enforce
                     // linearizability by choosing the latest input time.
+                    println!("USE GET READ TS");
                     self.get_read_ts()
                 } else {
                     let upper = self.indexes.greatest_open_upper(index_ids.iter().copied());
@@ -2672,6 +2687,7 @@ impl Coordinator {
                     // type that meets that assumption, but would break if we used a more general
                     // timestamp.
                     if let Some(candidate) = upper.elements().get(0) {
+                        println!("USE GREATEST OPEN UPPER");
                         if *candidate > 0 {
                             candidate.saturating_sub(1)
                         } else {
@@ -2690,6 +2706,7 @@ impl Coordinator {
                             );
                         }
                     } else {
+                        println!("USE MAX");
                         // A complete trace can be read in its final form with this time.
                         //
                         // This should only happen for literals that have no sources
@@ -3315,22 +3332,33 @@ impl Coordinator {
         //     since.join_assign(&self.source_info[instance_id].since);
         // }
 
+        println!("SHIP DATAFLOW, GET SINCES");
         // For each imported arrangement, lower bound `since` by its own frontier.
         for (global_id, (_description, _typ)) in dataflow.index_imports.iter() {
             since.join_assign(
+                &self
+                    .indexes
+                    .since_of(global_id)
+                    .expect("global id missing at coordinator"),
+            );
+            println!(
+                "\tID {} has since {:?}, lowering to {:?}",
+                self.catalog.get_by_id(global_id).name().to_string(),
                 self.indexes
                     .since_of(global_id)
                     .expect("global id missing at coordinator"),
+                since
             );
         }
 
         // For each produced arrangement, start tracking the arrangement with
         // a compaction frontier of at least `since`.
         for (global_id, _description, _typ) in dataflow.index_exports.iter() {
-            let mut frontiers =
+            let (frontiers, _initial_since) =
                 Frontiers::new(self.num_workers(), self.logical_compaction_window_ms);
-            frontiers.advance_since(&since);
+            let handle = frontiers.since_handle(since.elements().to_vec());
             self.indexes.insert(*global_id, frontiers);
+            self.since_handles.insert(*global_id, handle);
         }
 
         for (id, sink) in &dataflow.sink_exports {
@@ -3546,7 +3574,7 @@ pub async fn serve(
         transient_id_counter: 1,
         active_conns: HashMap::new(),
         txn_reads: HashMap::new(),
-        compaction_frontiers: HashMap::new(),
+        since_handles: HashMap::new(),
     };
     coord.broadcast(SequencedCommand::EnableFeedback(feedback_tx));
     if let Some(config) = &logging {

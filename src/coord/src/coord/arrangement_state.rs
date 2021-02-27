@@ -10,6 +10,7 @@
 //! Frontier state for each arrangement.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use differential_dataflow::lattice::Lattice;
 use timely::progress::frontier::{Antichain, AntichainRef, MutableAntichain};
@@ -57,9 +58,9 @@ impl<T: Timestamp> ArrangementFrontiers<T> {
     }
 
     /// The since frontier of a maintained index, if it exists.
-    pub fn since_of(&self, name: &GlobalId) -> Option<&Antichain<T>> {
+    pub fn since_of(&self, name: &GlobalId) -> Option<Antichain<T>> {
         if let Some(index_state) = self.get(name) {
-            Some(&index_state.since)
+            Some(index_state.since.lock().unwrap().frontier().to_owned())
         } else {
             None
         }
@@ -90,7 +91,7 @@ impl<T: Timestamp> ArrangementFrontiers<T> {
         let mut max_since = Antichain::from_elem(T::minimum());
         for id in identifiers {
             // TODO: We could avoid repeated allocation by swapping two buffers.
-            max_since.join_assign(self.since_of(&id).expect("Since missing at coordinator"));
+            max_since.join_assign(&self.since_of(&id).expect("Since missing at coordinator"));
         }
         max_since
     }
@@ -103,7 +104,7 @@ pub struct Frontiers<T: Timestamp> {
     /// The compaction frontier.
     /// All peeks in advance of this frontier will be correct,
     /// but peeks not in advance of this frontier may not be.
-    pub since: Antichain<T>,
+    pub since: Arc<Mutex<MutableAntichain<T>>>,
     /// Compaction delay.
     ///
     /// This timestamp drives the advancement of the since frontier as a
@@ -111,16 +112,20 @@ pub struct Frontiers<T: Timestamp> {
     pub compaction_window_ms: Option<T>,
 }
 
-impl<T: Timestamp> Frontiers<T> {
+impl<T: Timestamp + Copy> Frontiers<T> {
     /// Creates an empty index state from a number of workers.
-    pub fn new(workers: usize, compaction_window_ms: Option<T>) -> Self {
+    pub fn new(workers: usize, compaction_window_ms: Option<T>) -> (Self, MutableAntichainRc<T>) {
         let mut upper = MutableAntichain::new();
         upper.update_iter(Some((T::minimum(), workers as i64)));
-        Self {
-            upper,
-            since: Antichain::from_elem(T::minimum()),
-            compaction_window_ms,
-        }
+        let (initial_since, since) = MutableAntichainRc::make_from(T::minimum());
+        (
+            Self {
+                upper,
+                since,
+                compaction_window_ms,
+            },
+            initial_since,
+        )
     }
 
     /// Sets the latency behind the collection frontier at which compaction occurs.
@@ -128,14 +133,69 @@ impl<T: Timestamp> Frontiers<T> {
         self.compaction_window_ms = window_ms;
     }
 
-    /// Advances `since` to the least upper bound of itself and `frontier`.
-    ///
-    /// It is important that we only ever advance `since`, as winding it backwards
-    /// does not make the data backing the arrangement any more valid.
-    pub fn advance_since(&mut self, frontier: &Antichain<T>)
-    where
-        T: Lattice,
-    {
-        self.since.join_assign(frontier);
+    pub fn since_handle(&self, values: Vec<T>) -> MutableAntichainRc<T> {
+        let wrapper = Arc::clone(&self.since);
+        let changes = wrapper
+            .lock()
+            .unwrap()
+            .update_iter(values.iter().map(|x| (*x, 1)));
+        // The since must never retreat when new timestamps are added.
+        assert!(changes.next().is_none());
+        let drop_changes = Arc::clone(&self.drop_changes);
+        MutableAntichainRc {
+            values,
+            wrapper,
+            drop_changes,
+        }
+    }
+}
+
+pub struct MutableAntichainRc<T: Timestamp + Copy> {
+    values: Vec<T>,
+    // We have to use Arc here because the Coordinator is sent one time to a tokio
+    // task which requires everything to be Send, and Rc is !Send.
+    wrapper: Arc<Mutex<MutableAntichain<T>>>,
+    drop_changed: Arc<Mutex<Antichain<T>>>,
+}
+
+impl<T: Timestamp + Copy> MutableAntichainRc<T> {
+    /// Allocates a new handle from an antichain.
+    pub fn make_from(
+        value: T,
+        drop_changed: Arc<Mutex<Antichain<T>>>,
+    ) -> (Self, Arc<Mutex<MutableAntichain<T>>>) {
+        let wrapped = Arc::new(Mutex::new(MutableAntichain::new_bottom(value.clone())));
+
+        let handle = MutableAntichainRc {
+            values: vec![value],
+            wrapper: Arc::clone(&wrapped),
+            drop_changed,
+        };
+
+        (handle, wrapped)
+    }
+}
+
+impl<T: Timestamp + Copy> Clone for MutableAntichainRc<T> {
+    fn clone(&self) -> Self {
+        // Increase ref count for this value.
+        self.wrapper
+            .lock()
+            .unwrap()
+            .update_iter(self.values.iter().map(|x| (*x, 1)));
+        MutableAntichainRc {
+            values: self.values.clone(),
+            wrapper: Arc::clone(&self.wrapper),
+        }
+    }
+}
+
+impl<T: Timestamp + Copy> Drop for MutableAntichainRc<T> {
+    fn drop(&mut self) {
+        let inner = self.wrapper.lock().unwrap();
+        let changes = inner.update_iter(self.values.iter().map(|x| (*x, -1)));
+        if changes.next().is_some() {
+            self.drop_changed.lock().unwrap() = inner.frontier().to_owned();
+        }
     }
 }

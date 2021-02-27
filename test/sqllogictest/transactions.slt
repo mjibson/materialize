@@ -268,3 +268,33 @@ FETCH 0 c;
 COMPLETE 0
 COMPLETE 0
 COMPLETE 0
+
+# Verify that querying outside of a time domain is an error.
+simple
+SELECT 1;
+SELECT * FROM t;
+----
+db error: ERROR: "materialize.public.t_primary_idx" not in schemas of the first query
+
+# Verify that
+
+statement ok
+CREATE VIEW v AS VALUES (1);
+
+simple
+SELECT * FROM t;
+SELECT * FROM v;
+----
+1
+COMPLETE 1
+1
+COMPLETE 1
+
+simple
+SELECT *, mz_logical_timestamp() FROM v;
+SELECT *, mz_logical_timestamp() FROM t;
+----
+1,1614278930600
+COMPLETE 1
+1,1614278930600
+COMPLETE 1
