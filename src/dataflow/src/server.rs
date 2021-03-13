@@ -700,6 +700,7 @@ where
                             None
                         }
                         (ExternalSourceConnector::Postgres(_), _) => None,
+                        (ExternalSourceConnector::Cockroach(_), _) => None,
                     }
                 } else {
                     log::debug!(

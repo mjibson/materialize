@@ -48,6 +48,7 @@ use crate::operator::StreamExt;
 use crate::server::{TimestampDataUpdate, TimestampDataUpdates};
 use crate::CacheMessage;
 
+mod cockroach;
 mod file;
 mod kafka;
 mod kinesis;
@@ -57,6 +58,7 @@ mod util;
 
 pub mod cache;
 
+pub use cockroach::CockroachSimpleSource;
 use differential_dataflow::Hashable;
 pub use file::read_file_task;
 pub use file::FileReadStyle;

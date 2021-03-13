@@ -1085,6 +1085,7 @@ impl Timestamper {
                     })
             }
             ExternalSourceConnector::Postgres(_) => None,
+            ExternalSourceConnector::Cockroach(_) => None,
         }
     }
 
@@ -1328,6 +1329,7 @@ impl Timestamper {
             }
             ExternalSourceConnector::S3(_) => None, // BYO is not supported for s3 sources
             ExternalSourceConnector::Postgres(_) => None, // BYO is not supported for postgres sources
+            ExternalSourceConnector::Cockroach(_) => None, // BYO is not supported for cockroach sources
         }
     }
 

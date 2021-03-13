@@ -285,6 +285,13 @@ pub enum Connector<T: AstInfo> {
         /// The expected column schema of the synced table
         columns: Vec<ColumnDef<T>>,
     },
+    Cockroach {
+        /// The postgres connection string
+        conn: String,
+        /// The name of the table to sync
+        table: String,
+        columns: Vec<ColumnDef<T>>,
+    },
 }
 
 impl<T: AstInfo> AstDisplay for Connector<T> {
@@ -347,6 +354,19 @@ impl<T: AstInfo> AstDisplay for Connector<T> {
                 f.write_str(&display::escape_single_quote_string(publication));
                 f.write_str("' NAMESPACE '");
                 f.write_str(&display::escape_single_quote_string(namespace));
+                f.write_str("' TABLE '");
+                f.write_str(&display::escape_single_quote_string(table));
+                f.write_str("' (");
+                f.write_node(&display::comma_separated(columns));
+                f.write_str(")");
+            }
+            Connector::Cockroach {
+                conn,
+                table,
+                columns,
+            } => {
+                f.write_str("COCKROACH HOST '");
+                f.write_str(&display::escape_single_quote_string(conn));
                 f.write_str("' TABLE '");
                 f.write_str(&display::escape_single_quote_string(table));
                 f.write_str("' (");

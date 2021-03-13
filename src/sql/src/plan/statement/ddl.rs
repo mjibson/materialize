@@ -36,11 +36,11 @@ use repr::Row;
 use reqwest::Url;
 
 use dataflow_types::{
-    AvroEncoding, AvroOcfEncoding, AvroOcfSinkConnectorBuilder, Consistency, CsvEncoding,
-    DataEncoding, ExternalSourceConnector, FileSourceConnector, KafkaSinkConnectorBuilder,
-    KafkaSourceConnector, KinesisSourceConnector, PostgresSourceConnector, ProtobufEncoding,
-    RegexEncoding, S3SourceConnector, SinkConnectorBuilder, SinkEnvelope, SourceConnector,
-    SourceEnvelope,
+    AvroEncoding, AvroOcfEncoding, AvroOcfSinkConnectorBuilder, CockroachSourceConnector,
+    Consistency, CsvEncoding, DataEncoding, ExternalSourceConnector, FileSourceConnector,
+    KafkaSinkConnectorBuilder, KafkaSourceConnector, KinesisSourceConnector,
+    PostgresSourceConnector, ProtobufEncoding, RegexEncoding, S3SourceConnector,
+    SinkConnectorBuilder, SinkEnvelope, SourceConnector, SourceEnvelope,
 };
 use expr::GlobalId;
 use interchange::avro::{self, DebeziumDeduplicationStrategy, Encoder};
@@ -749,6 +749,76 @@ pub fn plan_create_source(
 
             (connector, DataEncoding::Postgres(desc))
         }
+        Connector::Cockroach {
+            conn,
+            table,
+            columns,
+        } => {
+            scx.require_experimental_mode("Cockroach Sources")?;
+
+            let qcx = QueryContext::root(scx, QueryLifetime::Static);
+            let desc = RelationDesc::empty();
+            let ecx = ExprContext {
+                qcx: &qcx,
+                name: "cockroach column cast",
+                scope: &Scope::empty(None),
+                relation_type: &desc.typ(),
+                allow_aggregates: false,
+                allow_subqueries: true,
+            };
+
+            // Build the expected relation description
+            let col_names: Vec<_> = columns
+                .iter()
+                .map(|c| Some(normalize::column_name(c.name.clone())))
+                .collect();
+
+            let mut col_types = vec![];
+            let mut cast_exprs = vec![];
+            for c in columns {
+                if let Some(collation) = &c.collation {
+                    unsupported!(format!(
+                        "CREATE SOURCE FROM COCKROACH with column collation: {}",
+                        collation
+                    ));
+                }
+
+                let (aug_data_type, _ids) = resolve_names_data_type(scx, c.data_type.clone())?;
+                let scalar_ty = plan::scalar_type_from_sql(scx, &aug_data_type)?;
+
+                let mut nullable = true;
+                for option in &c.options {
+                    match &option.option {
+                        ColumnOption::NotNull => nullable = false,
+                        other => unsupported!(format!(
+                            "CREATE SOURCE FROM COCKROACH with column constraint: {}",
+                            other
+                        )),
+                    }
+                }
+
+                let cast_expr = plan_hypothetical_cast(
+                    &ecx,
+                    CastContext::Explicit,
+                    &ScalarType::String,
+                    &scalar_ty,
+                )
+                .unwrap();
+
+                col_types.push(scalar_ty.nullable(nullable));
+                cast_exprs.push(cast_expr);
+            }
+
+            let desc = RelationDesc::new(RelationType::new(col_types), col_names);
+
+            let connector = ExternalSourceConnector::Cockroach(CockroachSourceConnector {
+                conn: conn.clone(),
+                table: table.clone(),
+                cast_exprs,
+            });
+
+            (connector, DataEncoding::Postgres(desc))
+        }
         Connector::AvroOcf { path, .. } => {
             let tail = match with_options.remove("tail") {
                 None => false,
@@ -1271,6 +1341,7 @@ pub fn plan_create_sink(
         Connector::AvroOcf { .. } => None,
         Connector::S3 { .. } => None,
         Connector::Postgres { .. } => None,
+        Connector::Cockroach { .. } => None,
     };
 
     let key_desc_and_indices = key_indices.map(|key_indices| {
@@ -1314,6 +1385,7 @@ pub fn plan_create_sink(
         }
         Connector::S3 { .. } => unsupported!("S3 sinks"),
         Connector::Postgres { .. } => unsupported!("Postgres sinks"),
+        Connector::Cockroach { .. } => unsupported!("Cockroach sinks"),
     };
 
     if !with_options.is_empty() {

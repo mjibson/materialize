@@ -1648,7 +1648,29 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_connector(&mut self) -> Result<Connector<Raw>, ParserError> {
-        match self.expect_one_of_keywords(&[FILE, KAFKA, KINESIS, AVRO, S3, POSTGRES])? {
+        match self.expect_one_of_keywords(&[COCKROACH, FILE, KAFKA, KINESIS, AVRO, S3, POSTGRES])? {
+            COCKROACH => {
+                self.expect_keyword(HOST)?;
+                let conn = self.parse_literal_string()?;
+                self.expect_keyword(TABLE)?;
+                let table = self.parse_literal_string()?;
+
+                let (columns, constraints) = self.parse_columns()?;
+
+                if !constraints.is_empty() {
+                    return parser_err!(
+                        self,
+                        self.peek_prev_pos(),
+                        "Cannot specify constraints in cockroach table definition"
+                    );
+                }
+
+                Ok(Connector::Cockroach {
+                    conn,
+                    table,
+                    columns,
+                })
+            }
             POSTGRES => {
                 self.expect_keyword(HOST)?;
                 let conn = self.parse_literal_string()?;

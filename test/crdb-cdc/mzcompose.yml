@@ -1,0 +1,48 @@
+# Copyright Materialize, Inc. All rights reserved.
+#
+# Use of this software is governed by the Business Source License
+# included in the LICENSE file at the root of this repository.
+#
+# As of the Change Date specified in that file, in accordance with
+# the Business Source License, use of this software will be governed
+# by the Apache License, Version 2.0.
+
+version: '3.7'
+
+mzworkflows:
+  crdb-cdc:
+    steps:
+      - step: start-services
+        services: [materialized, crdb]
+      - step: wait-for-mz
+      - step: wait-for-postgres
+        dbname: defaultdb
+        user: root
+        service: crdb
+      - step: run
+        service: testdrive-svc
+
+services:
+  testdrive-svc:
+    mzbuild: testdrive
+    entrypoint: testdrive --materialized-url=postgres://materialize@materialized:6875 crdb-cdc.td
+    volumes:
+      - .:/workdir
+    depends_on: [materialized, crdb]
+
+  materialized:
+    mzbuild: materialized
+    command: --experimental --disable-telemetry
+    ports:
+      - 6875
+    environment:
+    - MZ_DEV=1
+    - MZ_LOG
+
+  crdb:
+    image: cockroachdb/cockroach:v20.2.5
+    ports:
+      - 26257
+    command: start-single-node --insecure --listen-addr 0.0.0.0
+    environment:
+    - COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING=true
